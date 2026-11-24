@@ -3,6 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
+import { CurrencyAmountInput } from '@/components/CurrencyAmountInput';
 import { useMilestonesForm } from '@/hooks/useMilestonesForm';
 import { useParams } from 'next/navigation';
 
@@ -88,14 +89,14 @@ export default function CreateMilestonesPage() {
                     {/* Amount & Due Date */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Amount (XLM)</label>
-                      <input
-                        type="number"
+                      <CurrencyAmountInput
+                        token="XLM"
                         name="amount"
                         min="0"
                         step="0.01"
                         value={milestone.amount || ''}
                         onChange={(e) => handleMilestoneChange(index, e)}
-                        className={`w-full px-4 py-2 border rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white transition-shadow ${errors[index]?.amount ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'}`}
+                        inputClassName={`w-full pr-4 py-2 border rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white transition-shadow ${errors[index]?.amount ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'}`}
                       />
                       {errors[index]?.amount && <p className="mt-1 text-xs text-red-500">{errors[index].amount}</p>}
                     </div>

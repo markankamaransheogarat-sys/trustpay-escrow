@@ -35,6 +35,46 @@ export function getBalanceShortfall(balance: number | null, budget: number): num
   return Math.max(0, Number((required - available).toFixed(7)));
 }
 
+/**
+ * Returns the compact prefix badge label (`$`, `€`, or `XLM`) displayed inside amount inputs.
+ */
+export function getCurrencySymbolPrefix(token: string | null | undefined): string {
+  const normalized = (token || "").trim().toUpperCase();
+  if (!normalized || normalized === "USDC" || normalized === "PYUSD") return "$";
+  if (normalized === "EURC") return "€";
+  if (normalized === "XLM") return "XLM";
+  return normalized;
+}
+
+/**
+ * Computes left input padding so right-aligned numbers never collide with the currency prefix badge.
+ */
+export function getCurrencyInputPaddingClass(prefix: string): string {
+  const len = prefix.trim().length;
+  if (len <= 1) return "pl-11";
+  if (len <= 3) return "pl-16";
+  return "pl-20";
+}
+
+/**
+ * Parses raw numeric text into a clean finite number (or `""` when cleared), stripping any stray
+ * currency symbols, whitespace, or grouping commas.
+ */
+export function parseCurrencyNumericInput(rawValue: string | number): number | "" {
+  if (typeof rawValue === "number") {
+    return Number.isFinite(rawValue) ? rawValue : "";
+  }
+  const stripped = rawValue
+    .replace(/(?:^|[^a-zA-Z])(?:USDC|EURC|PYUSD|XLM)(?=[\s\d.,$€₱✦]|$)/gi, "")
+    .replace(/[$€₱✦,\s]/g, "")
+    .trim();
+  if (stripped === "" || stripped === "-" || stripped === "." || stripped === "-.") {
+    return "";
+  }
+  const parsed = Number(stripped);
+  return Number.isFinite(parsed) ? parsed : "";
+}
+
 export function isBalanceSufficient(balance: number | null, budget: number): boolean {
   return getBalanceShortfall(balance, budget) === 0;
 }
@@ -242,7 +282,10 @@ export function useCreateProjectForm() {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     let newValue: any = value;
-    if (name === 'budget') newValue = Number(value);
+    if (name === 'budget') {
+      const parsed = parseCurrencyNumericInput(value);
+      newValue = parsed === '' ? 0 : parsed;
+    }
     if (name === 'token') {
       const tokenConfig = SUPPORTED_TOKENS[value as keyof typeof SUPPORTED_TOKENS];
       setFormData((prev) => ({
@@ -437,6 +480,7 @@ export function useCreateProjectForm() {
   return {
     formData,
     setFormData,
+    currencyPrefix: getCurrencySymbolPrefix(formData.token),
     handleFiatDepositDetected,
     handlePathSwapComplete,
     loading,

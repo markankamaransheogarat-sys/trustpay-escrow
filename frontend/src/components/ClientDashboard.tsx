@@ -17,6 +17,7 @@ import { ProjectCardSkeletonList } from '@/components/skeletons';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
 import { useTokenBalance, useTokenBalances, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
 import { TokenSelector } from '@/components/TokenSelector';
+import { CurrencyAmountInput } from '@/components/CurrencyAmountInput';
 import { usePersistentTab } from '@/hooks/usePersistentTab';
 import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
 import { LiquidityDepthOptimizer } from '@/components/LiquidityDepthOptimizer';
@@ -1291,14 +1292,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   <label className="block text-xs sm:text-sm font-semibold text-[#e4e4e7]">
                     Total budget ({formToken})
                   </label>
-                  <input
-                    type="number"
+                  <CurrencyAmountInput
+                    token={formToken}
+                    min={0}
+                    step="any"
                     value={formBudget}
-                    onChange={(e) =>
-                      setFormBudget(e.target.value === '' ? '' : Number(e.target.value))
-                    }
+                    onValueChange={setFormBudget}
                     placeholder="900"
-                    className="w-full px-4 py-3 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500 transition-colors"
+                    data-testid="client-budget-input"
+                    badgeTestId="client-budget-prefix"
+                    inputClassName="w-full py-3 pr-4 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500 transition-colors"
                   />
                 </div>
 
@@ -1938,14 +1941,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   <label className="block text-xs font-semibold text-[#e4e4e7]">
                     Amount ({formToken}) <span className="text-red-400">*</span>
                   </label>
-                  <input
-                    type="number"
+                  <CurrencyAmountInput
+                    token={formToken}
+                    min={0}
+                    step="any"
                     value={newMilestoneAmount}
-                    onChange={(e) =>
-                      setNewMilestoneAmount(e.target.value === '' ? '' : Number(e.target.value))
-                    }
+                    onValueChange={setNewMilestoneAmount}
                     placeholder="300"
-                    className="w-full px-3.5 py-2.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500"
+                    data-testid="client-milestone-amount-input"
+                    badgeTestId="client-milestone-amount-prefix"
+                    inputClassName="w-full py-2.5 pr-3.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500"
                   />
                 </div>
 
