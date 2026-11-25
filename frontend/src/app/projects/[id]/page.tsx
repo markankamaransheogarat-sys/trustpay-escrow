@@ -8,6 +8,8 @@ import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
 
 import { Milestone, Project } from '@/types';
 import { ImageLightboxModal } from '@/components/ImageLightboxModal';
+import { DisputeEvidenceAttachments } from '@/components/DisputeEvidenceAttachments';
+import { downloadBlob } from '@/lib/share-card';
 import { ProjectDetailSkeleton } from '@/components/skeletons';
 import { ProjectAuditLog } from '@/components/ProjectAuditLog';
 import { CalendarExportButton } from '@/components/CalendarExportButton';
@@ -18,6 +20,8 @@ import { authFetch } from '@/lib/api';
 import { CryptoId } from '@/components/ui/CryptoId';
 
 import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { useA11yAnnouncer } from '@/components/A11yLiveAnnouncer';
+import { MilestoneCertificateButton } from '@/components/MilestoneCertificateButton';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
 import {
   createProjectOnChain,
@@ -38,6 +42,7 @@ import { DeliverableDiffViewer } from '@/components/DeliverableDiffViewer';
 import { SorobanEventStreamDrawer } from '@/components/SorobanEventStreamDrawer';
 import { MilestoneGanttChart } from '@/components/MilestoneGanttChart';
 import { DeliverableChecksums } from '@/components/FileChecksumBadge';
+import { GitRepoMilestoneConnector, GitDeliverableBadge } from '@/components/GitRepoMilestoneConnector';
 import {
   RequestRevisionModal,
   type RevisionRequestPayload,
@@ -49,6 +54,7 @@ export default function ProjectDetailsPage() {
   const projectId = params.id as string;
 
   const { address, activeRole } = useWalletStore();
+  const { announce } = useA11yAnnouncer();
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,6 +94,15 @@ export default function ProjectDetailsPage() {
   const [showDeliverableDiff, setShowDeliverableDiff] = useState(false);
 
   const { signWithSep07, sep07Modal } = useSep07Signer();
+
+  // Announce async blockchain state changes to screen readers (#309)
+  useEffect(() => {
+    if (!txState.isOpen || !txState.message) return;
+    announce(
+      `Escrow transaction ${txState.stage}: ${txState.message}`,
+      txState.stage === 'error' ? 'assertive' : 'polite'
+    );
+  }, [txState.isOpen, txState.stage, txState.message, txState.error, announce]);
 
   const [showSecurityModal, setShowSecurityModal] = useState(false);
   const [showMutualCancelModal, setShowMutualCancelModal] = useState(false);
@@ -1100,16 +1115,19 @@ export default function ProjectDetailsPage() {
                       )}
 
                       {m.deliverable_url && (
-                        <div className="pl-10 pt-0.5 text-xs text-indigo-400 flex items-center gap-2">
-                          <span className="text-slate-500 font-medium">Deliverable Link:</span>
-                          <a
-                            href={m.deliverable_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="underline hover:text-indigo-300 truncate max-w-xs font-mono text-[11px]"
-                          >
-                            {m.deliverable_url}
-                          </a>
+                        <div className="pl-10 pt-1 flex flex-wrap items-center gap-2">
+                          <div className="text-xs text-indigo-400 flex items-center gap-2">
+                            <span className="text-slate-500 font-medium">Deliverable Link:</span>
+                            <a
+                              href={m.deliverable_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline hover:text-indigo-300 truncate max-w-xs font-mono text-[11px]"
+                            >
+                              {m.deliverable_url}
+                            </a>
+                          </div>
+                          <GitDeliverableBadge url={m.deliverable_url} commitHash={m.deliverable_hash} />
                         </div>
                       )}
 
@@ -1212,9 +1230,12 @@ export default function ProjectDetailsPage() {
                         )}
 
                         {m.status === 'approved' && (
-                          <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-xl border border-emerald-500/20 flex items-center gap-1.5">
-                            <span>✓</span> Released On-Chain
-                          </span>
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-xl border border-emerald-500/20 flex items-center gap-1.5">
+                              <span>✓</span> Released On-Chain
+                            </span>
+                            <MilestoneCertificateButton project={project} milestone={m} txHash={project.tx_hash} />
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1266,13 +1287,14 @@ export default function ProjectDetailsPage() {
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1.5">Deliverable URL / Repository PR / IPFS Gateway</label>
-                <input
-                  type="text"
-                  value={deliverableUrl}
-                  onChange={(e) => setDeliverableUrl(e.target.value)}
-                  placeholder="https://github.com/organization/repo/pull/1 or https://ipfs.io/ipfs/..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                <GitRepoMilestoneConnector
+                  initialUrl={deliverableUrl}
+                  onConnectorChange={({ url, metadata, isValid }) => {
+                    setDeliverableUrl(url);
+                    if (isValid && metadata) {
+                      setDeliverableHash(metadata.latestCommitHash);
+                    }
+                  }}
                 />
               </div>
 
@@ -1485,6 +1507,7 @@ export default function ProjectDetailsPage() {
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-slate-200 focus:outline-none focus:border-red-500"
                 />
               </div>
+              <DisputeEvidenceAttachments />
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
@@ -1632,6 +1655,10 @@ export default function ProjectDetailsPage() {
           imageUrl={lightboxImage.url}
           imageAlt={lightboxImage.name}
           onClose={() => setLightboxImage(null)}
+          onAnnotatedExport={({ blob, filename }) => {
+            downloadBlob(blob, filename);
+            toast.success('Sanitized copy downloaded');
+          }}
         />
       )}
 

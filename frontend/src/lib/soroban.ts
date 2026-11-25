@@ -326,9 +326,258 @@ export async function invokeSorobanMethod(options: {
   throw new Error(`Transaction timed out while awaiting ledger inclusion (tx: ${txHash}). Please verify on Stellar.Expert.`);
 }
 
+export interface SorobanBatchCall {
+  functionName: string;
+  args: xdr.ScVal[];
+  contractAddress?: string;
+}
+
+/**
+ * invokeSorobanBatch (#308)
+ *
+ * Executes several contract invocations inside a single Stellar transaction so
+ * enterprise clients approve/fund multiple milestones with one wallet prompt.
+ * All operations share one signature and one network fee; Soroban atomicity
+ * means either every milestone release lands or none of them do.
+ */
+export async function invokeSorobanBatch(options: {
+  callerAddress: string;
+  calls: SorobanBatchCall[];
+  onStatusUpdate?: TxStatusCallback;
+  baseFee?: number | string;
+}): Promise<SorobanTxResult> {
+  const { callerAddress, calls, onStatusUpdate } = options;
+
+  if (!calls.length) {
+    throw new Error('Batch invocation requires at least one contract call.');
+  }
+  if (!(await isConnected())) {
+    throw new Error('Freighter wallet extension is not detected. Please install and unlock Freighter.');
+  }
+
+  const perOperationFee = BigInt(options.baseFee ?? getSorobanBaseFee() ?? DEFAULT_SOROBAN_BASE_FEE);
+
+  onStatusUpdate?.('preparing', 'Validating wallet connection and account status...');
+  await ensureAccountExists(callerAddress);
+
+  const server = getSorobanRpcServer();
+  const sourceAccount = await server.getAccount(callerAddress);
+
+  const functionNames = Array.from(new Set(calls.map((call) => call.functionName)));
+  onStatusUpdate?.(
+    'simulating',
+    calls.length === 1
+      ? `Simulating contract call '${functionNames[0]}'...`
+      : `Simulating ${calls.length} batched contract calls (${functionNames.join(', ')})...`
+  );
+
+  const builder = new TransactionBuilder(sourceAccount, {
+    // TransactionBuilder multiplies this per-operation fee by the number of operations.
+    fee: perOperationFee.toString(),
+    networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+  });
+
+  calls.forEach((call) => {
+    builder.addOperation(
+      Operation.invokeContractFunction({
+        contract: call.contractAddress || DEFAULT_ESCROW_CONTRACT_ID,
+        function: call.functionName,
+        args: call.args,
+      })
+    );
+  });
+
+  const baseTx = builder.setTimeout(180).build();
+
+  let preparedTx: any;
+  try {
+    preparedTx = await server.prepareTransaction(baseTx);
+  } catch (simErr: any) {
+    const errorMsg = simErr?.message || String(simErr);
+    throw new Error(`Contract simulation failed for batched call: ${errorMsg}`);
+  }
+
+  onStatusUpdate?.('signing', 'Awaiting authorization signature in Freighter wallet...');
+
+  let signResult: any;
+  try {
+    signResult = await signTransaction(preparedTx.toXDR(), {
+      networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+    });
+  } catch (signErr: any) {
+    throw new Error(`Wallet signing cancelled or rejected: ${signErr.message || signErr}`);
+  }
+
+  let signedXdr = '';
+  if (typeof signResult === 'string') {
+    signedXdr = signResult;
+  } else if (signResult && typeof signResult === 'object') {
+    if (signResult.error) {
+      throw new Error(
+        typeof signResult.error === 'string'
+          ? signResult.error
+          : signResult.error.message || 'Freighter rejected signature'
+      );
+    }
+    signedXdr = signResult.signedTxXdr || signResult.signedTransaction || '';
+  }
+
+  if (!signedXdr) {
+    throw new Error('Transaction signing was rejected or returned empty XDR.');
+  }
+
+  onStatusUpdate?.('submitting', 'Broadcasting transaction to Stellar network...');
+
+  const signedTx = TransactionBuilder.fromXDR(signedXdr, STELLAR_NETWORK_PASSPHRASE);
+  const sendRes = await server.sendTransaction(signedTx);
+
+  if (sendRes.status === 'ERROR') {
+    const detail = sendRes.errorResult ? JSON.stringify(sendRes.errorResult) : sendRes.status;
+    throw new Error(`Transaction rejected by Stellar RPC: ${detail}`);
+  }
+
+  const txHash = sendRes.hash;
+  onStatusUpdate?.('polling', `Transaction submitted (tx: ${txHash.slice(0, 8)}...). Awaiting confirmation...`);
+
+  let attempts = 0;
+  const maxAttempts = 35;
+  while (attempts < maxAttempts) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const txStatus = await server.getTransaction(txHash);
+
+    if (txStatus.status === 'SUCCESS') {
+      let parsedReturn: any = null;
+      if (txStatus.returnValue) {
+        try {
+          parsedReturn = scValToNative(txStatus.returnValue);
+        } catch {
+          parsedReturn = txStatus.returnValue;
+        }
+      }
+      onStatusUpdate?.('success', 'Transaction successfully confirmed on Stellar!');
+      return { success: true, txHash, returnValue: parsedReturn };
+    }
+
+    if (txStatus.status === 'FAILED') {
+      throw new Error(`Soroban transaction failed during ledger execution (tx: ${txHash})`);
+    }
+
+    attempts++;
+  }
+
+  throw new Error(`Transaction timed out while awaiting ledger inclusion (tx: ${txHash}). Please verify on Stellar.Expert.`);
+}
+
 /**
  * Creates an on-chain escrow project and locks the milestone funds into the Soroban contract.
  */
+export interface CreateProjectArgsParams {
+  clientAddress: string;
+  freelancerAddress?: string;
+  arbiterAddress?: string;
+  tokenAddress?: string;
+  milestoneAmounts: number[];
+  yieldEnabled?: boolean;
+}
+
+/** Parameter names of the escrow contract's `create_project`, in call order. */
+export const CREATE_PROJECT_ARG_NAMES = [
+  'client',
+  'freelancer',
+  'arbiter',
+  'token',
+  'milestone_amounts',
+  'yield_enabled',
+] as const;
+
+/** Escrow amounts are i128 values scaled to 7 decimals (stroops). */
+export const AMOUNT_SCALE = 10_000_000;
+
+/**
+ * Build the ScVal arguments for `create_project`. Shared by the live wallet
+ * flow and the DAO proposal generator so the proposed calldata is exactly what
+ * the app would submit itself.
+ */
+export function buildCreateProjectArgs(params: CreateProjectArgsParams): xdr.ScVal[] {
+  const {
+    clientAddress,
+    freelancerAddress,
+    arbiterAddress = DEFAULT_ARBITER_ADDRESS,
+    tokenAddress = SUPPORTED_TOKENS.USDC.issuerOrContractAddress,
+    milestoneAmounts,
+    yieldEnabled = false,
+  } = params;
+
+  // Build Soroban ScVal vector of milestone amounts (scaled to 7 decimals / 10^7 stroops)
+  const milestoneScVals = milestoneAmounts.map((amt) =>
+    nativeToScVal(BigInt(Math.round(amt * AMOUNT_SCALE)), { type: 'i128' })
+  );
+
+  const freelancerScVal = freelancerAddress
+    ? Address.fromString(freelancerAddress).toScVal()
+    : xdr.ScVal.scvVoid();
+
+  return [
+    Address.fromString(clientAddress).toScVal(),
+    freelancerScVal,
+    Address.fromString(arbiterAddress).toScVal(),
+    Address.fromString(tokenAddress).toScVal(),
+    xdr.ScVal.scvVec(milestoneScVals),
+    nativeToScVal(Boolean(yieldEnabled), { type: 'bool' }),
+  ];
+}
+
+export interface EncodedInvocationArg {
+  name: string;
+  /** Human-readable value (addresses, decimal amounts). */
+  value: string;
+  /** Base64 XDR of the ScVal. */
+  xdr: string;
+}
+
+export interface SorobanInvocationPayload {
+  contractId: string;
+  functionName: string;
+  args: EncodedInvocationArg[];
+  /** Base64 XDR of the InvokeContract host function, ready for a governance executor. */
+  hostFunctionXdr: string;
+}
+
+/**
+ * Encode a `create_project` invocation as governance-ready calldata: each
+ * argument as base64 ScVal XDR, plus the complete InvokeContract host function.
+ * Pure: it never touches the network or a wallet.
+ */
+export function encodeCreateProjectInvocation(
+  params: CreateProjectArgsParams & { contractAddress?: string }
+): SorobanInvocationPayload {
+  const contractId = params.contractAddress || DEFAULT_ESCROW_CONTRACT_ID;
+  const args = buildCreateProjectArgs(params);
+  const values = [
+    params.clientAddress,
+    params.freelancerAddress || 'None',
+    params.arbiterAddress || DEFAULT_ARBITER_ADDRESS,
+    params.tokenAddress || SUPPORTED_TOKENS.USDC.issuerOrContractAddress,
+    `[${params.milestoneAmounts.join(', ')}]`,
+    String(Boolean(params.yieldEnabled)),
+  ];
+  const invokeArgs = new xdr.InvokeContractArgs({
+    contractAddress: Address.fromString(contractId).toScAddress(),
+    functionName: 'create_project',
+    args,
+  });
+  return {
+    contractId,
+    functionName: 'create_project',
+    args: args.map((arg, i) => ({
+      name: CREATE_PROJECT_ARG_NAMES[i],
+      value: values[i],
+      xdr: arg.toXDR('base64'),
+    })),
+    hostFunctionXdr: xdr.HostFunction.hostFunctionTypeInvokeContract(invokeArgs).toXDR('base64'),
+  };
+}
+
 export async function createProjectOnChain(params: {
   clientAddress: string;
   freelancerAddress?: string;
@@ -339,34 +588,9 @@ export async function createProjectOnChain(params: {
   contractAddress?: string;
   onStatusUpdate?: TxStatusCallback;
 }): Promise<{ success: boolean; txHash: string; onChainProjectId: number | bigint }> {
-  const {
-    clientAddress,
-    freelancerAddress,
-    arbiterAddress = DEFAULT_ARBITER_ADDRESS,
-    tokenAddress = SUPPORTED_TOKENS.USDC.issuerOrContractAddress,
-    milestoneAmounts,
-    yieldEnabled = false,
-    contractAddress,
-    onStatusUpdate,
-  } = params;
+  const { clientAddress, contractAddress, onStatusUpdate } = params;
 
-  // Build Soroban ScVal vector of milestone amounts (scaled to 7 decimals / 10^7 stroops)
-  const milestoneScVals = milestoneAmounts.map((amt) =>
-    nativeToScVal(BigInt(Math.round(amt * 10_000_000)), { type: 'i128' })
-  );
-
-  const freelancerScVal = freelancerAddress
-    ? Address.fromString(freelancerAddress).toScVal()
-    : xdr.ScVal.scvVoid();
-
-  const args: xdr.ScVal[] = [
-    Address.fromString(clientAddress).toScVal(),
-    freelancerScVal,
-    Address.fromString(arbiterAddress).toScVal(),
-    Address.fromString(tokenAddress).toScVal(),
-    xdr.ScVal.scvVec(milestoneScVals),
-    nativeToScVal(Boolean(yieldEnabled), { type: 'bool' }),
-  ];
+  const args = buildCreateProjectArgs(params);
 
   const result = await invokeSorobanMethod({
     callerAddress: clientAddress,
